@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-	Insane Move - Copy sites to Office 365 in parallel.  ShareGate Insane Mode times ten!
+	Insane Move - Copy sites to Office 365 in parallel with ShareGate Insane Mode!
 .DESCRIPTION
 	Copy SharePoint site collections to Office 365 in parallel.  CSV input list of source/destination URLs.  XML with general preferences.
 
