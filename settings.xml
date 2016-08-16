@@ -1,0 +1,16 @@
+<?xml version="1.0" standalone="yes"?>
+<settings>
+	<tenant>
+		<adminURL>https://tenant-admin.sharepoint.com</adminURL>
+		<adminUser>admin@tenant.onmicrosoft.com</adminUser>
+	</tenant>
+	<siteLock>
+		<readOnlyBeforeCopy>$false</readOnlyBeforeCopy>
+		<noAccessAfterCopy>$false</noAccessAfterCopy>
+	</siteLock>
+	<maxWorker>4</maxWorker>
+	<notify>
+		<smtp>mailhub</smtp>
+		<from>sharepoint-no-reply@company.com</from>
+	</notify>
+</settings>

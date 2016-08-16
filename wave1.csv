@@ -1,0 +1,7 @@
+SourceURL,DestinationURL
+http://mysite/personal/user1,https://tenant-my.sharepoint.com/personal/user1
+http://mysite/personal/user2,https://tenant-my.sharepoint.com/personal/user2
+http://mysite/personal/user3,https://tenant-my.sharepoint.com/personal/user3
+http://sharepoint/sites/team1,https://tenant.sharepoint.com/sites/team1
+http://sharepoint/sites/team2,https://tenant.sharepoint.com/sites/team2
+http://sharepoint/sites/team3,https://tenant.sharepoint.com/sites/team3
