@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-	Insane Move - Copy sites to Office 365 in parallel with ShareGate Insane Mode!
+	Insane Move - Copy sites to Office 365 in parallel.  ShareGate Insane Mode times ten!
 .DESCRIPTION
 	Copy SharePoint site collections to Office 365 in parallel.  CSV input list of source/destination URLs.  XML with general preferences.
 
@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.10
-	Last Modified	: 08-16-2016
+	Version			: 0.11
+	Last Modified	: 08-17-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -22,11 +22,18 @@ param (
 	
 	[Parameter(Mandatory=$false, ValueFromPipeline=$false, HelpMessage='Clear saved passwords in HKCU registry.')]
 	[Alias("c")]
-	[switch]$clearSavedPW = $false
+	[switch]$clearSavedPW = $false,
+	
+	[Parameter(Mandatory=$false, ValueFromPipeline=$false, HelpMessage='Create all Office 365 site collections.  Prep step before real migration.')]
+	[Alias("v")]
+	[switch]$verifyCloudSites = $false
 )
 
 # Plugin
 Add-PSSnapIn Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue | Out-Null
+Import-Module Microsoft.Online.SharePoint.PowerShell -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Out-Null
+
+# Config
 $root = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
 [xml]$settings = Get-Content "$root\settings.xml"
 $maxWorker = $settings.settings.maxWorker
@@ -102,7 +109,7 @@ Function DetectVendor() {
 	# Detect if Vendor software installed
 	$coll = @()
 	foreach ($s in $spservers) {
-		$found = Get-ChildItem "\\$($s.Address)\C$\Program Files (x86)\Sharegate\Sharegate.exe"
+		$found = Get-ChildItem "\\$($s.Address)\C$\Program Files (x86)\Sharegate\Sharegate.exe" -ErrorAction SilentlyContinue
 		if ($found) {
 			$coll += $s.Address
 		}
@@ -114,40 +121,9 @@ Function DetectVendor() {
 }
 
 Function ReadAdminPW() {
-	# Registry HKCU folder
-	$path = "HKCU:\Software\InsaneMove"
-	if (!(Test-Path $path)) {md $path | Out-Null}
-	$name = $settings.settings.tenant.adminUser
-	
-	# Do we need to clear old paswords?
-	if ($clearSavedPW) {
-		Remove-ItemProperty -Path $path -Name $name -Confirm:$false
-		Write-Host "Deleted password OK for $name" -Fore Yellow
-		Exit
-	}
-	
-	# Do we have registry HKCU saved password?
-	$hash = (Get-ItemProperty -Path $path -Name $name -ErrorAction SilentlyContinue)."$name"
-	
-	# Prompt for input
-	if (!$hash) {
-		$sec = Read-Host "Enter Password for $($settings.settings.tenant.adminUser)" -AsSecureString
-		if (!$sec) {
-			Write-Error "Exit - No password given"
-			Exit
-		}
-		$hash = $sec | ConvertFrom-SecureString
-		
-		# Prompt to save to HKCU
-		$save = Read-Host "Save to HKCU registry (secure hash) [Y/N]?"
-		if ($save -like "Y*") {
-			Set-ItemProperty -Path $path -Name $name -Value $hash -Force
-			Write-Host "Saved password OK for $name" -Fore Yellow
-		}
-	}
-	
-	# Return
-	return $hash
+	# Prompt for admin password
+    return (Read-Host "Enter Password for $($settings.settings.tenant.adminUser)")
+
 }
 
 Function CloseSession() {
@@ -178,7 +154,8 @@ Function CreateTracker() {
 	foreach ($row in $csv) {
 		# Assign each row to a Session
 		$sid = (Get-PSSession)[$j].Id
-		$obj = New-Object -TypeName PSObject -Prop (@{"SourceURL"=$row.SourceURL;"DestinationURL"=$row.DestinationURL;"CsvID"=$i;"SessionID"=$sid;"JobID"=0;"Status"="New";"SGResult"="";"SGServer"="";"SGSessionId"="";"SGSiteObjectsCopied"="";"SGItemsCopied"="";"SGWarnings"="";"SGErrors"=""})
+		$pc = (Get-PSSession)[$j].ComputerName
+		$obj = New-Object -TypeName PSObject -Prop (@{"SourceURL"=$row.SourceURL;"DestinationURL"=$row.DestinationURL;"CsvID"=$i;"SessionID"=$sid;"JobID"=0;"PC="$pc;"Status"="New";"Log"="";;"SGResult"="";"SGServer"="";"SGSessionId"="";"SGSiteObjectsCopied"="";"SGItemsCopied"="";"SGWarnings"="";"SGErrors"=""})
 		$global:track += $obj
 
 		# Increment ID
@@ -206,7 +183,7 @@ Function UpdateTracker () {
 				# Update DB tracking
 				$row.Status = "Completed"
 
-                # Detailed output from ShareGate "Copy-Site" cmdlet
+                # Detail from ShareGate "Copy-Site" cmdlet
                 $out = $job[0].ChildJobs[0].output
 				$row.SGServer = $out.PSComputerName
 				$row.SGResult = $out.Result
@@ -218,6 +195,13 @@ Function UpdateTracker () {
 			} elseif ($job.State -ne "Running" -and $job.State -ne "NotStarted") {
 				# Update DB tracking
 				$row.Status = "Failed"
+
+                # Detail Error
+                $err = ""
+                $job.ChildJobs[0].Error |% {
+                    $err += $_.Exception + $_.CategoryInfo + $_.FullyQualifiedErrorId + "`n"
+                }
+                $row.SGResult = $err
 			}
 		}
 	}
@@ -228,11 +212,11 @@ Function ExecuteSiteCopy($row, $session) {
 	$id = $row.Id
 	$name = $row.Name
 	$srcUrl = $row.SourceURL
-	$destUrl = $row.DestinationURL
+	$destUrl = FormatCloudMP $row.DestinationURL
 	
 	# Core command
-	$when = (Get-Date).ToString("yyyy-MM-dd-hh-mm-ss")
-	$str = "`$logFile=""InsaneMove-Worker-$when.txt"";Start-Transcript `$logFile;`$hash = ""$global:adminPass"";`$secpw = ConvertTo-SecureString -String `$hash;`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src = Connect-Site $srcUrl;`n`$dest = Connect-Site $destUrl -Credential `$cred;`nCopy-Site -Site `$src -DestinationSite `$dest -Merge -InsaneMode -VersionLimit 100;Stop-Transcript"
+	$id = $session.Id
+	$str = "Start-Transcript;`$secpw=""$global:adminPass"" | ConvertTo-SecureString -AsPlainText -Force;`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src = Connect-Site $srcUrl;`n`$dest = Connect-Site $destUrl -Credential `$cred;`nCopy-Site -Site `$src -DestinationSite `$dest -Merge -InsaneMode -VersionLimit 100;Stop-Transcript"
 	Write-Host $str -Fore yellow
 
 	# Execute
@@ -243,7 +227,7 @@ Function ExecuteSiteCopy($row, $session) {
 Function WriteCSV() {
     # Write new CSV output with detailed results
     $file = $fileCSV.Replace(".csv", "-results.csv")
-    $global:track | SourceURL,DestinationURL,CsvID,SessionID,JobID,Status,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors | Export-Csv $file -NoTypeInformation -Force
+    $global:track | select SourceURL,DestinationURL,CsvID,SessionID,JobID,PC,Status,Log,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors | Export-Csv $file -NoTypeInformation -Force
 }
 
 Function CopySites() {
@@ -279,6 +263,7 @@ Function CopySites() {
 					# Update DB tracking
 					$row.JobID = $result.Id
 					$row.Status = "InProgress"
+					$row.Log = $global:log
 				}
 				
 				# Progress bar %
@@ -287,7 +272,7 @@ Function CopySites() {
 				Write-Progress -Activity "Copy site" -Status "$name ($prct %)" -PercentComplete $prct
 
 				# Detail table
-				$global:track |? {$_.Status -ne "Completed"} | ft -a
+				$global:track |? {$_.Status -eq "InProgress"} | select CsvID,JobID,SessionID,SourceURL,DestinationURL | ft -a
 				$grp = $global:track | group Status
 				$grp | select Count,Name | sort Name | ft -a
 			}
@@ -301,7 +286,66 @@ Function CopySites() {
 	# Complete
 	Write-Host "===== Finish Site Copy to O365 ===== $(Get-Date)" -Fore Yellow
 	$global:track | group status | ft -a
-	$global:track | ft -a
+	$global:track | select CsvID,JobID,SessionID,SGSessionId,PC,SourceURL,DestinationURL | ft -a
+}
+
+Function VerifyCloudSites() {
+	# Read CSV and ensure cloud sites exists for each row
+	Write-Host "===== Verify Site Collections exist in O365 ===== $(Get-Date)" -Fore Yellow
+	
+	# Connect-SPO
+	$secpw = ConvertTo-SecureString -String $global:adminPass -AsPlainText -Force
+	$c = New-Object System.Management.Automation.PSCredential ($settings.settings.tenant.adminUser, $secpw)
+	Connect-SPOService -URL $settings.settings.tenant.adminURL -Credential $c
+	
+	# Loop CSV
+	$csv = Import-Csv $fileCSV
+	foreach ($row in $csv) {
+		$row | ft
+		EnsureCloudSite $row.SourceURL $row.DestinationURL $true
+	}
+}
+
+Function EnsureCloudSite($srcUrl, $destUrl, $noWait) {
+	# Create site in O365 if does not exist
+	$destUrl = FormatCloudMP $destUrl
+	Write-Host $destUrl -Fore Yellow
+	$web = (Get-SPSite $srcUrl).RootWeb;
+	$rae = $web.RequestAccessEmail.Split(",;")[0].Split("@")[0] + "@" + $settings.settings.tenant.suffix;
+	if (!$rae) {
+		$rae = $settings.settings.tenant.adminUser
+	}
+	
+	# Verify SPOUser
+	$u = Get-SPOUser -Site $settings.settings.tenant.adminURL -LoginName $rae -ErrorAction SilentlyContinue
+	if (!$u) {
+		$rae = $settings.settings.tenant.adminUser
+	}
+	
+	# Verisy SPOSite
+	try {
+		$cloud = Get-SPOSite $destUrl -ErrorAction SilentlyContinue
+	} catch {}
+	if (!$cloud) {
+		Write-Host "- CREATING $destUrl"
+		if ($noWait) {
+			New-SPOSite -Owner $rae -Url $destUrl -NoWait -StorageQuota (1024*50)
+		} else {
+			New-SPOSite -Owner $rae -Url $destUrl -StorageQuota (1024*50)
+		}
+	} else {
+		Write-Host "- FOUND $destUrl"
+	}
+}
+
+Function FormatCloudMP($url) {
+	# Replace Managed Path with O365 /sites/ only
+	$managedPath = "sites"
+	$i = $url.indexOf("://")+3
+	$split = $url.substring($i, $url.length-$i).Split("/")
+	$split[1] = $managedPath
+	$final = ($url.substring(0,$i) + ($split -join "/")).replace("http:","https:")
+	return $final
 }
 
 Function Main() {
@@ -311,18 +355,23 @@ Function Main() {
 	$logFile = "$root\log\InsaneMove-$when.txt"
 	mkdir "$root\log" -ErrorAction SilentlyContinue | Out-Null
 	Start-Transcript $logFile
-	Write-Host "$fileCSV = $fileCSV"
+	Write-Host "fileCSV = $fileCSV"
 
-	# Core 	
-	VerifyPSRemoting
-	ReadIISPW
-	$global:adminPass = ReadAdminPW
-	DetectVendor
-	CloseSession
-	OpenSession
-	CopySites
-	CloseSession
-    WriteCSV
+	# Core
+	if ($verifyCloudSites) {
+		$global:adminPass = ReadAdminPW
+		VerifyCloudSites
+	} else {
+		VerifyPSRemoting
+		ReadIISPW
+		$global:adminPass = ReadAdminPW
+		DetectVendor
+		CloseSession
+		OpenSession
+		CopySites
+		CloseSession
+		WriteCSV
+	}
 	
 	# Finish LOG
 	Write-Host "===== DONE ===== $(Get-Date)" -Fore Yellow
