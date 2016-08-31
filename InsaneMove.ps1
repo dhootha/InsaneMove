@@ -410,6 +410,7 @@ Function Main() {
 	$th = [Math]::Round(((Get-Date) - $start).TotalHours, 2)
 	Write-Host "Duration Hours: $th`n" -Fore Yellow
 	Write-Host "Total Sites: "$($global:track.count) -Fore Green
+	Write-Host "Total Storage (MB): "$(($global:track |measure SPStorage -Sum).Sum) -Fore Green
 	Write-Host "Total Objects: "$(($global:track |measure SGItemsCopied -Sum).Sum) -Fore Green
 	if (!$psISE) {Stop-Transcript}
 }
