@@ -112,7 +112,7 @@ Function DetectVendor() {
 	}
 	
 	# Display and return
-	$coll | ft
+	$coll |% {Write-Host $_ -Fore Green}
 	$global:servers = $coll
 }
 
@@ -156,7 +156,7 @@ Function CreateTracker() {
 		$SPStorage = [Math]::Round((Get-SPSite $row.SourceURL).Usage.Storage/1MB,2)
 
 		# Add row
-		$obj = New-Object -TypeName PSObject -Prop (@{"SourceURL"=$row.SourceURL;"DestinationURL"=$row.DestinationURL;"CsvID"=$i;"SessionID"=$sid;"JobID"=0;"PC"=$pc;"Status"="New";"Log"="";;"SGResult"="";"SGServer"="";"SGSessionId"="";"SGSiteObjectsCopied"="";"SGItemsCopied"="";"SGWarnings"="";"SGErrors"="";"Error"="";"ErrorCount"="";"SPStorage"=$SPStorage})
+		$obj = New-Object -TypeName PSObject -Prop (@{"SourceURL"=$row.SourceURL;"DestinationURL"=$row.DestinationURL;"CsvID"=$i;"SessionID"=$sid;"JobID"=0;"PC"=$pc;"Status"="New";"Log"="";;"SGResult"="";"SGServer"="";"SGSessionId"="";"SGSiteObjectsCopied"="";"SGItemsCopied"="";"SGWarnings"="";"SGErrors"="";"Error"="";"ErrorCount"="";"JobXML"="";"SPStorage"=$SPStorage})
 		$global:track += $obj
 
 		# Increment ID
@@ -187,14 +187,12 @@ Function UpdateTracker () {
             } elseif ($job.State -ne "Running" -and $job.State -ne "NotStarted") {              
 				# Update DB tracking
 				$status = "Failed"
-           
 			}
-
+			
             # Update to save
             if ($status) {
                 # Status
                 $row.Status = $status
-
 
                  # Details from ShareGate
                 $out = $job[0].ChildJobs[0].output
@@ -222,8 +220,9 @@ Function UpdateTracker () {
                 $row.Error = $err
                 $row.ErrorCount = $errCount
 
+				# JobXML
+				$row.JobXML = ($job|ConvertTo-Xml).OuterXml
             }
-			
 		}
 	}
 }
@@ -250,7 +249,7 @@ Function ExecuteSiteCopy($row, $session) {
 Function WriteCSV() {
     # Write new CSV output with detailed results
     $file = $fileCSV.Replace(".csv", "-results.csv")
-    $global:track | select SourceURL,DestinationURL,CsvID,SessionID,JobID,PC,Status,Log,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors,Error,ErrorCount | Export-Csv $file -NoTypeInformation -Force
+    $global:track | select SourceURL,DestinationURL,CsvID,SessionID,JobID,PC,Status,Log,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors,Error,ErrorCount,JobXML,SPStorage | Export-Csv $file -NoTypeInformation -Force
 }
 
 Function CopySites() {
@@ -279,6 +278,7 @@ Function CopySites() {
                     }
 
                     # Kick off copy
+					Sleep 3
 				    $result = ExecuteSiteCopy $row $session
 
 				    # Update DB tracking
@@ -294,9 +294,11 @@ Function CopySites() {
 			$prct = [Math]::Round(($complete/$total)*100)
 			
 			# ETA
-			$elapsed = (Get-Date) - $start
-			$remain = ($elapsed.TotalSeconds) / ($prct / 100.0)
-			$eta = (Get-Date).AddSeconds($remain - $elapsed.TotalSeconds)
+			if ($prct) {
+				$elapsed = (Get-Date) - $start
+				$remain = ($elapsed.TotalSeconds) / ($prct / 100.0)
+				$eta = (Get-Date).AddSeconds($remain - $elapsed.TotalSeconds)
+			}
 			
 			# Display
 			Write-Progress -Activity "Copy site - ETA $eta" -Status "$name ($prct %)" -PercentComplete $prct
@@ -408,12 +410,21 @@ Function Main() {
 	# Finish LOG
 	Write-Host "===== DONE ===== $(Get-Date)" -Fore Yellow
 	$th = [Math]::Round(((Get-Date) - $start).TotalHours, 2)
-	Write-Host "Duration Hours: $th`n" -Fore Yellow
-	Write-Host "Total Sites: "$($global:track.count) -Fore Green
-	Write-Host "Total Storage (MB): "$(($global:track |measure SPStorage -Sum).Sum) -Fore Green
-	Write-Host "Total Objects: "$(($global:track |measure SGItemsCopied -Sum).Sum) -Fore Green
+	$attemptMb = ($global:track |measure SPStorage -Sum).Sum
+	$actualMb = ($global:track |? {$_.SGSessionId -ne ""} |measure SPStorage -Sum).Sum
+	$actualSites = ($global:track |? {$_.SGSessionId -ne ""}).Count
+	Write-Host ("Duration Hours              : {0:N2}" -f $th) -Fore Yellow
+	Write-Host ("Total Sites Attempted       : {0}" -f $($global:track.count)) -Fore Green
+	Write-Host ("Total Sites Copied          : {0}" -f $actualSites) -Fore Green
+	Write-Host ("Total Storage Attempted (MB): {0:N0}" -f $attemptMb) -Fore Green
+	Write-Host ("Total Storage Copied (MB)   : {0:N0}" -f $actualMb) -Fore Green
+	Write-Host ("Total Objects               : {0}" -f $(($global:track |measure SGItemsCopied -Sum).Sum)) -Fore Green
+	Write-Host ("Total Worker Threads        : {0}" -f $maxWorker) -Fore Green
+	Write-Host "====="  -Fore Yellow
+	Write-Host ("GB per Hour                 : {0:N2}" -f (($actualMb/1KB)/$th)) -Fore Green
+	Write-Host $fileCSV
 	if (!$psISE) {Stop-Transcript}
 }
 
-$fileCSV = "custom.csv"
+$fileCSV = "wave3.csv"
 Main
