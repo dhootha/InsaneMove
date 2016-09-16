@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.12
-	Last Modified	: 08-31-2016
+	Version			: 0.15
+	Last Modified	: 09-15-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -119,7 +119,6 @@ Function DetectVendor() {
 Function ReadAdminPW() {
 	# Prompt for admin password
     return (Read-Host "Enter Password for $($settings.settings.tenant.adminUser)")
-
 }
 
 Function CloseSession() {
@@ -131,12 +130,18 @@ Function CloseSession() {
 Function OpenSession() {
 	# Open worker sessions per server.  Runspace to execute jobs
 	# Loop available servers
+	$global:workers = @()
+	$i = 0
 	foreach ($server in $global:servers) {
 		# Loop maximum worker
 		1..$maxWorker |% {
-			New-PSSession -ComputerName $server -Credential $global:cred -Authentication CredSSP -ErrorAction SilentlyContinue
+			$s = New-PSSession -ComputerName $server -Credential $global:cred -Authentication CredSSP -ErrorAction SilentlyContinue
+			$obj = New-Object -TypeName PSObject -Prop (@{"Id"=$i;"PC"=$server;"SessionId"=$s.Id})
+			$global:workers += $obj			
+			$i++
 		}
 	}
+	$global:workers | ft
 }
 
 Function CreateTracker() {
@@ -146,30 +151,48 @@ Function CreateTracker() {
 	$j = 0
 	$global:track = @()
 	$csv = Import-Csv $fileCSV
-	$sessions = Get-PSSession
 	foreach ($row in $csv) {
-		# Assign each row to a Session
-		$sid = (Get-PSSession)[$j].Id
-		$pc = (Get-PSSession)[$j].ComputerName
+		# Assign each row to a Worker
+		$pc = $global:workers[$j].PC
 		
 		# Get SharePoint total storage
 		$SPStorage = [Math]::Round((Get-SPSite $row.SourceURL).Usage.Storage/1MB,2)
 
 		# Add row
-		$obj = New-Object -TypeName PSObject -Prop (@{"SourceURL"=$row.SourceURL;"DestinationURL"=$row.DestinationURL;"CsvID"=$i;"SessionID"=$sid;"JobID"=0;"PC"=$pc;"Status"="New";"Log"="";;"SGResult"="";"SGServer"="";"SGSessionId"="";"SGSiteObjectsCopied"="";"SGItemsCopied"="";"SGWarnings"="";"SGErrors"="";"Error"="";"ErrorCount"="";"JobXML"="";"SPStorage"=$SPStorage})
+		$obj = New-Object -TypeName PSObject -Prop (@{
+			"SourceURL"=$row.SourceURL;
+			"DestinationURL"=$row.DestinationURL;
+			"CsvID"=$i;
+			"WorkerID"=$j;
+			"JobID"=0;
+			"PC"=$pc;
+			"Status"="New";
+			"Log"="";
+			"SGResult"="";
+			"SGServer"="";
+			"SGSessionId"="";
+			"SGSiteObjectsCopied"="";
+			"SGItemsCopied"="";
+			"SGWarnings"="";
+			"SGErrors"="";
+			"Error"="";
+			"ErrorCount"="";
+			"JobXML"="";
+			"SPStorage"=$SPStorage
+		})
 		$global:track += $obj
 
 		# Increment ID
 		$i++
 		$j++
-		if ($j -ge $sessions.count) {
+		if ($j -ge $global:workers.count) {
 			# Reset, back to first Session
 			$j = 0
 		}
 	}
 	
 	# Display
-	Get-PSSession |ft -a
+	Get-PSSession | ft -a
 }
 
 Function UpdateTracker () {
@@ -227,29 +250,36 @@ Function UpdateTracker () {
 	}
 }
 
-Function ExecuteSiteCopy($row, $session) {
+Function ExecuteSiteCopy($row, $worker) {
 	# Parse fields
-	$id = $row.Id
 	$name = $row.Name
 	$srcUrl = $row.SourceURL
 	$destUrl = FormatCloudMP $row.DestinationURL
 	
-	# Core command
-	$id = $session.Id
-	$str = "`$secpw=""$global:adminPass"" | ConvertTo-SecureString -AsPlainText -Force`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw)`n`nImport-Module ShareGate`n`$src=`$null`n`$dest=`$null`n`$src = Connect-Site ""$srcUrl""`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred`nCopy-Site -Site `$src -DestinationSite `$dest -Merge -InsaneMode -VersionLimit 100"
+	# Close OLD session - remote PowerShell
+	Get-PSSession $worker.SessionId | Remove-PSSession
 	
-    Write-Host $session.ComputerName -Fore Green
+	# Make NEW Session - remote PowerShell
+	$server = $worker.PC
+	$s = New-PSSession -ComputerName $server -Credential $global:cred -Authentication CredSSP -ErrorAction SilentlyContinue
+	$global:workers[$worker.Id].SessionId = $s.Id
+	
+	# Core command
+	$str = "`$secpw=""$global:adminPass"" | ConvertTo-SecureString -AsPlainText -Force;`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`nCopy-Site -Site `$src -DestinationSite `$dest -Merge -InsaneMode -VersionLimit 100"
+	
+	# Display
+    Write-Host $s.ComputerName -Fore Green
 	Write-Host $str -Fore yellow
 
 	# Execute
 	$cmd = [Scriptblock]::Create($str) 
-	return Invoke-Command $cmd -Session $session -AsJob
+	return Invoke-Command $cmd -Session $s -AsJob
 }
 
 Function WriteCSV() {
     # Write new CSV output with detailed results
     $file = $fileCSV.Replace(".csv", "-results.csv")
-    $global:track | select SourceURL,DestinationURL,CsvID,SessionID,JobID,PC,Status,Log,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors,Error,ErrorCount,JobXML,SPStorage | Export-Csv $file -NoTypeInformation -Force
+    $global:track | select SourceURL,DestinationURL,CsvID,WorkerID,JobID,PC,Status,Log,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors,Error,ErrorCount,JobXML,SPStorage | Export-Csv $file -NoTypeInformation -Force
 }
 
 Function CopySites() {
@@ -263,15 +293,23 @@ Function CopySites() {
 		Write-Host "." -NoNewline
 		
 		# Ensure all sessions are active
-		foreach ($session in Get-PSSession) {
+		foreach ($worker in $global:workers) {
 			# Count active sessions per server
-			$sid = $session.Id
-			$active = $global:track |? {$_.Status -eq "InProgress" -and $_.SessionID -eq $sid}
+			$wid = $worker.Id
+			$active = $global:track |? {$_.Status -eq "InProgress" -and $_.WorkerID -eq $wid}
+			#Write-Host "@@@"
+			#$active |ft
+			#Write-Host "@@@"
 
             # Available session.  Assign new work
 			if (!$active) {
 				# Next row
-                $row = $global:track |? {$_.Status -eq "New" -and $_.SessionID -eq $sid}
+                $row = $global:track |? {$_.Status -eq "New" -and $_.WorkerID -eq $wid}
+				#Write-Host "!!!"
+			#$row |ft
+			#Write-Host "!!!"
+			#$global:track|select status,*url|ft -a
+			
                 if ($row) {
                     if ($row -is [Array]) {
                         $row = $row[0]
@@ -279,7 +317,7 @@ Function CopySites() {
 
                     # Kick off copy
 					Sleep 3
-				    $result = ExecuteSiteCopy $row $session
+				    $result = ExecuteSiteCopy $row $worker
 
 				    # Update DB tracking
 				    $row.JobID = $result.Id
@@ -304,10 +342,9 @@ Function CopySites() {
 			Write-Progress -Activity "Copy site - ETA $eta" -Status "$name ($prct %)" -PercentComplete $prct
 
 			# Detail table
-			$global:track |? {$_.Status -eq "InProgress"} | select CsvID,JobID,SessionID,PC,SourceURL,DestinationURL | ft -a
+			$global:track |? {$_.Status -eq "InProgress"} | select CsvID,JobID,WorkerID,PC,SourceURL,DestinationURL | ft -a
 			$grp = $global:track | group Status
 			$grp | select Count,Name | sort Name | ft -a
-			
 		}
 
 		# Latest counter
@@ -418,7 +455,7 @@ Function Main() {
 	Write-Host ("Total Sites Copied          : {0}" -f $actualSites) -Fore Green
 	Write-Host ("Total Storage Attempted (MB): {0:N0}" -f $attemptMb) -Fore Green
 	Write-Host ("Total Storage Copied (MB)   : {0:N0}" -f $actualMb) -Fore Green
-	Write-Host ("Total Objects               : {0}" -f $(($global:track |measure SGItemsCopied -Sum).Sum)) -Fore Green
+	Write-Host ("Total Objects               : {0:N0}" -f $(($global:track |measure SGItemsCopied -Sum).Sum)) -Fore Green
 	Write-Host ("Total Worker Threads        : {0}" -f $maxWorker) -Fore Green
 	Write-Host "====="  -Fore Yellow
 	Write-Host ("GB per Hour                 : {0:N2}" -f (($actualMb/1KB)/$th)) -Fore Green
@@ -426,5 +463,4 @@ Function Main() {
 	if (!$psISE) {Stop-Transcript}
 }
 
-$fileCSV = "wave3.csv"
 Main
