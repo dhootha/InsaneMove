@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.15
-	Last Modified	: 09-15-2016
+	Version			: 0.17
+	Last Modified	: 09-26-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -156,7 +156,10 @@ Function CreateTracker() {
 		$pc = $global:workers[$j].PC
 		
 		# Get SharePoint total storage
-		$SPStorage = [Math]::Round((Get-SPSite $row.SourceURL).Usage.Storage/1MB,2)
+		$site = Get-SPSite $row.SourceURL
+		if ($site) {
+			$SPStorage = [Math]::Round($site.Usage.Storage/1MB,2)
+		}
 
 		# Add row
 		$obj = New-Object -TypeName PSObject -Prop (@{
@@ -287,7 +290,9 @@ Function CopySites() {
 	Write-Host "===== Start Site Copy to O365 ===== $(Get-Date)" -Fore Yellow
 	CreateTracker
 	
+	$i = 0
 	do {
+		$i++
 		# Get latest Job status
 		UpdateTracker
 		Write-Host "." -NoNewline
@@ -297,18 +302,11 @@ Function CopySites() {
 			# Count active sessions per server
 			$wid = $worker.Id
 			$active = $global:track |? {$_.Status -eq "InProgress" -and $_.WorkerID -eq $wid}
-			#Write-Host "@@@"
-			#$active |ft
-			#Write-Host "@@@"
 
             # Available session.  Assign new work
 			if (!$active) {
 				# Next row
                 $row = $global:track |? {$_.Status -eq "New" -and $_.WorkerID -eq $wid}
-				#Write-Host "!!!"
-			#$row |ft
-			#Write-Host "!!!"
-			#$global:track|select status,*url|ft -a
 			
                 if ($row) {
                     if ($row -is [Array]) {
@@ -316,7 +314,7 @@ Function CopySites() {
                     }
 
                     # Kick off copy
-					Sleep 3
+					Sleep 5
 				    $result = ExecuteSiteCopy $row $worker
 
 				    # Update DB tracking
@@ -345,6 +343,12 @@ Function CopySites() {
 			$global:track |? {$_.Status -eq "InProgress"} | select CsvID,JobID,WorkerID,PC,SourceURL,DestinationURL | ft -a
 			$grp = $global:track | group Status
 			$grp | select Count,Name | sort Name | ft -a
+		}
+		
+		# Write Csv
+		if ($i -gt 5) {
+			WriteCSV
+			$i = 0
 		}
 
 		# Latest counter
