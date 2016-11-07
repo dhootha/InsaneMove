@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.17
-	Last Modified	: 09-26-2016
+	Version			: 0.26
+	Last Modified	: 11-07-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -31,7 +31,7 @@ Import-Module Microsoft.Online.SharePoint.PowerShell -ErrorAction SilentlyContin
 
 # Config
 $root = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
-[xml]$settings = Get-Content "$root\settings.xml"
+[xml]$settings = Get-Content "$root\InsaneMove.xml"
 $maxWorker = $settings.settings.maxWorker
 
 Function VerifyPSRemoting() {
@@ -107,7 +107,9 @@ Function DetectVendor() {
 	foreach ($s in $spservers) {
 		$found = Get-ChildItem "\\$($s.Address)\C$\Program Files (x86)\Sharegate\Sharegate.exe" -ErrorAction SilentlyContinue
 		if ($found) {
-			$coll += $s.Address
+            #if ($s.Address -ne "PWSYS-APSP-03") {
+			    $coll += $s.Address
+            #}
 		}
 	}
 	
@@ -116,27 +118,62 @@ Function DetectVendor() {
 	$global:servers = $coll
 }
 
-Function ReadAdminPW() {
+Function ReadCloudPW() {
 	# Prompt for admin password
-    return (Read-Host "Enter Password for $($settings.settings.tenant.adminUser)")
+    return (Read-Host "Enter O365 Cloud Password for $($settings.settings.tenant.adminUser)")
 }
 
 Function CloseSession() {
 	# Close remote PS sessions
 	Get-PSSession | Remove-PSSession
-	Get-Job | Remove-Job
 }
 
-Function OpenSession() {
-	# Open worker sessions per server.  Runspace to execute jobs
+Function CreateWorkers() {
+	# Open worker sessions per server.  Runspace to create local SCHTASK on remote PC
+    # Template command
+    $cmd = @'
+mkdir "d:\InsaneMove" -ErrorAction SilentlyContinue | Out-Null
+
+Function VerifySchtask($name, $file) {
+	$found = Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
+	if ($found) {
+		$found | Unregister-ScheduledTask -Confirm:$false
+	}
+
+	$user = "domain\user"
+	$pw = "password"
+	
+	$folder = Split-Path $file
+	$a = New-ScheduledTaskAction -Execute "PowerShell.exe" -Argument $file -WorkingDirectory $folder
+	$p = New-ScheduledTaskPrincipal -RunLevel Highest -UserId $user -LogonType Password
+	$task = New-ScheduledTask -Action $a -Principal $p
+	return Register-ScheduledTask -TaskName $name -InputObject $task -Password $pw -User $user
+}
+
+VerifySchtask "worker1" "d:\InsaneMove\worker1.ps1"
+'@
+
 	# Loop available servers
 	$global:workers = @()
 	$i = 0
-	foreach ($server in $global:servers) {
+	foreach ($pc in $global:servers) {
 		# Loop maximum worker
-		1..$maxWorker |% {
-			$s = New-PSSession -ComputerName $server -Credential $global:cred -Authentication CredSSP -ErrorAction SilentlyContinue
-			$obj = New-Object -TypeName PSObject -Prop (@{"Id"=$i;"PC"=$server;"SessionId"=$s.Id})
+		$s = New-PSSession -ComputerName $pc -Credential $global:cred -Authentication CredSSP -ErrorAction SilentlyContinue
+        $s
+        1..$maxWorker |% {
+            # create worker
+            $curr = $cmd -replace "worker1","worker$i"
+            Write-Host "CREATE Worker$i on $pc ..." -Fore Yellow
+            $sb = [Scriptblock]::Create($curr)
+            $result = Invoke-Command -Session $s -ScriptBlock $sb
+            $result | ft
+			
+			# purge old worker XML output
+			$resultfile = "\\$pc\d$\insanemove\worker$i.xml"
+            Remove-Item $resultfile -confirm:$false -ErrorAction SilentlyContinue
+			
+            # track worker
+			$obj = New-Object -TypeName PSObject -Prop (@{"Id"=$i;"PC"=$pc})
 			$global:workers += $obj			
 			$i++
 		}
@@ -167,10 +204,8 @@ Function CreateTracker() {
 			"DestinationURL"=$row.DestinationURL;
 			"CsvID"=$i;
 			"WorkerID"=$j;
-			"JobID"=0;
 			"PC"=$pc;
 			"Status"="New";
-			"Log"="";
 			"SGResult"="";
 			"SGServer"="";
 			"SGSessionId"="";
@@ -180,8 +215,10 @@ Function CreateTracker() {
 			"SGErrors"="";
 			"Error"="";
 			"ErrorCount"="";
-			"JobXML"="";
-			"SPStorage"=$SPStorage
+			"TaskXML"="";
+			"SPStorage"=$SPStorage;
+			"TimeCopyStart"="";
+			"TimeCopyEnd"=""
 		})
 		$global:track += $obj
 
@@ -199,56 +236,67 @@ Function CreateTracker() {
 }
 
 Function UpdateTracker () {
-	# Update tracker with latest Job ID status
+	# Update tracker with latest SCHTASK status
 	$active = $global:track |? {$_.Status -eq "InProgress"}
 	foreach ($row in $active) {
-		# Monitor remote server job
-		if ($row.JobID) {
-			$job = Get-Job $row.JobID
-            
-            $status = ""
-			if ($job.State -eq "Completed") {
-				# Update DB tracking
-				$status = "Completed"
-            } elseif ($job.State -ne "Running" -and $job.State -ne "NotStarted") {              
-				# Update DB tracking
-				$status = "Failed"
-			}
+		# Monitor remote SCHTASK
+		$wid = $row.WorkerID
+        $pc = $row.PC
+		
+		# Reconnect Broken
+		$b = Get-PSSession |? {$_.State -eq "Broken"}
+		if ($b) {
+			# Make new session
+			New-PSSession -ComputerName $b.ComputerName -Credential $global:cred -Authentication CredSSP -ErrorAction SilentlyContinue
 			
-            # Update to save
-            if ($status) {
-                # Status
-                $row.Status = $status
+			# Close old session
+			$b | Remove-PSSession
+		}
+		
+		# Check SCHTASK State=Ready
+		$s = Get-PSSession |? {$_.ComputerName -eq $pc}
+		$cmd = "Get-Scheduledtask -TaskName 'worker$wid'"
+		$sb = [Scriptblock]::Create($cmd)
+		$schtask = Invoke-Command -Session $s -Command $sb
+		if ($schtask) {
+			$schtask | select {$pc},TaskName,State | ft -a
+			if ($schtask.State -eq 3) {
+				$row.Status = "Completed"
+				$row.TimeCopyEnd = (Get-Date).ToString()
+				
+				# Do we have ShareGate XML?
+				$resultfile = "\\$pc\d$\insanemove\worker$wid.xml"
+				if (Test-Path $resultfile) {
+					# Read XML
+					$x = $null
+					[xml]$x = Get-Content $resultfile
+					if ($x) {
+						# Parse XML nodes
+						$row.SGServer = $pc
+						$row.SGResult = ($x.Objs.Obj.Props.S |? {$_.N -eq "Result"})."#text"
+						$row.SGSessionId = ($x.Objs.Obj.Props.S |? {$_.N -eq "SessionId"})."#text"
+						$row.SGSiteObjectsCopied = ($x.Objs.Obj.Props.I32 |? {$_.N -eq "SiteObjectsCopied"})."#text"
+						$row.SGItemsCopied = ($x.Objs.Obj.Props.I32 |? {$_.N -eq "ItemsCopied"})."#text"
+						$row.SGWarnings = ($x.Objs.Obj.Props.I32 |? {$_.N -eq "Warnings"})."#text"
+						$row.SGErrors = ($x.Objs.Obj.Props.I32 |? {$_.N -eq "Errors"})."#text"
+						
+						# TaskXML
+						$row.TaskXML = $x.OuterXml
+						
+						# Delete XML
+						Remove-Item $resultfile -confirm:$false -ErrorAction SilentlyContinue
+					}
 
-                 # Details from ShareGate
-                $out = $job[0].ChildJobs[0].output
-                if ($out) {
-			        $row.SGServer = $out.PSComputerName
-			        $row.SGResult = $out.Result
-			        $row.SGSessionId = $out.SessionId
-			        $row.SGSiteObjectsCopied = $out.SiteObjectsCopied
-			        $row.SGItemsCopied = $out.ItemsCopied
-			        $row.SGWarnings = $out.Warnings
-			        $row.SGErrors = $out.Errors
-                }
-
-                # Error
-                $err = ""
-                $errcount = 0
-                $job[0].ChildJobs[0].Error |% {
-                    $err += ($_|ConvertTo-Xml).OuterXml
-                    $errcount++
-                }
-                $job[0].Error |% {
-                    $err += ($_|ConvertTo-Xml).OuterXml
-                    $errcount++
-                }
-                $row.Error = $err
-                $row.ErrorCount = $errCount
-
-				# JobXML
-				$row.JobXML = ($job|ConvertTo-Xml).OuterXml
-            }
+					# Error
+					$err = ""
+					$errcount = 0
+					$task.Error |% {
+						$err += ($_|ConvertTo-Xml).OuterXml
+						$errcount++
+					}
+					$row.ErrorCount = $errCount
+				}
+			}
 		}
 	}
 }
@@ -259,30 +307,32 @@ Function ExecuteSiteCopy($row, $worker) {
 	$srcUrl = $row.SourceURL
 	$destUrl = FormatCloudMP $row.DestinationURL
 	
-	# Close OLD session - remote PowerShell
-	Get-PSSession $worker.SessionId | Remove-PSSession
-	
 	# Make NEW Session - remote PowerShell
-	$server = $worker.PC
-	$s = New-PSSession -ComputerName $server -Credential $global:cred -Authentication CredSSP -ErrorAction SilentlyContinue
-	$global:workers[$worker.Id].SessionId = $s.Id
+    $wid = $worker.Id	
+    $pc = $worker.PC
+	$s = Get-PSSession |? {$_.ComputerName -eq $pc}
 	
-	# Core command
-	$str = "`$secpw=""$global:adminPass"" | ConvertTo-SecureString -AsPlainText -Force;`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`nCopy-Site -Site `$src -DestinationSite `$dest -Merge -InsaneMode -VersionLimit 100"
+	# Generate PS1 worker script
+	$ps = "Start-Transcript ""d:\insanemove\log\worker$wid.log"";`n`$secpw=""$global:cloudPW"" | ConvertTo-SecureString -AsPlainText -Force;`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$result=Copy-Site -Site `$src -DestinationSite `$dest -Merge -InsaneMode -VersionLimit 100;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
+    $ps | Out-File "\\$pc\d$\insanemove\worker$wid.ps1" -Force
+    Write-Host $ps -Fore Yellow
+
+    # Invoke SCHTASK
+    $cmd = "Get-ScheduledTask -TaskName ""worker$wid"" | Start-ScheduledTask"
 	
 	# Display
-    Write-Host $s.ComputerName -Fore Green
-	Write-Host $str -Fore yellow
+    Write-Host "START worker $wid on $pc" -Fore Green
+	Write-Host "$srcUrl,$destUrl" -Fore yellow
 
 	# Execute
-	$cmd = [Scriptblock]::Create($str) 
-	return Invoke-Command $cmd -Session $s -AsJob
+	$sb = [Scriptblock]::Create($cmd) 
+	return Invoke-Command $sb -Session $s
 }
 
 Function WriteCSV() {
     # Write new CSV output with detailed results
     $file = $fileCSV.Replace(".csv", "-results.csv")
-    $global:track | select SourceURL,DestinationURL,CsvID,WorkerID,JobID,PC,Status,Log,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors,Error,ErrorCount,JobXML,SPStorage | Export-Csv $file -NoTypeInformation -Force
+    $global:track | select SourceURL,DestinationURL,CsvID,WorkerID,PC,Status,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors,Error,ErrorCount,TaskXML,SPStorage | Export-Csv $file -NoTypeInformation -Force
 }
 
 Function CopySites() {
@@ -318,9 +368,8 @@ Function CopySites() {
 				    $result = ExecuteSiteCopy $row $worker
 
 				    # Update DB tracking
-				    $row.JobID = $result.Id
 				    $row.Status = "InProgress"
-				    $row.Log = $global:log
+					$row.TimeCopyStart = (Get-Date).ToString()
                 }
 			}
 				
@@ -340,7 +389,7 @@ Function CopySites() {
 			Write-Progress -Activity "Copy site - ETA $eta" -Status "$name ($prct %)" -PercentComplete $prct
 
 			# Detail table
-			$global:track |? {$_.Status -eq "InProgress"} | select CsvID,JobID,WorkerID,PC,SourceURL,DestinationURL | ft -a
+			$global:track |? {$_.Status -eq "InProgress"} | select CsvID,WorkerID,PC,SourceURL,DestinationURL | ft -a
 			$grp = $global:track | group Status
 			$grp | select Count,Name | sort Name | ft -a
 		}
@@ -367,7 +416,7 @@ Function VerifyCloudSites() {
 	Write-Host "===== Verify Site Collections exist in O365 ===== $(Get-Date)" -Fore Yellow
 	
 	# Connect-SPO
-	$secpw = ConvertTo-SecureString -String $global:adminPass -AsPlainText -Force
+	$secpw = ConvertTo-SecureString -String $global:cloudPW -AsPlainText -Force
 	$c = New-Object System.Management.Automation.PSCredential ($settings.settings.tenant.adminUser, $secpw)
 	Connect-SPOService -URL $settings.settings.tenant.adminURL -Credential $c
 	
@@ -383,8 +432,10 @@ Function EnsureCloudSite($srcUrl, $destUrl, $noWait) {
 	# Create site in O365 if does not exist
 	$destUrl = FormatCloudMP $destUrl
 	Write-Host $destUrl -Fore Yellow
-	$web = (Get-SPSite $srcUrl).RootWeb;
-	$rae = $web.RequestAccessEmail.Split(",;")[0].Split("@")[0] + "@" + $settings.settings.tenant.suffix;
+	$web = (Get-SPSite $srcUrl).RootWeb
+	if ($web.RequestAccessEmail) {
+		$rae = $web.RequestAccessEmail.Split(",;")[0].Split("@")[0] + "@" + $settings.settings.tenant.suffix;
+	}
 	if (!$rae) {
 		$rae = $settings.settings.tenant.adminUser
 	}
@@ -434,15 +485,15 @@ Function Main() {
 
 	# Core
 	if ($verifyCloudSites) {
-		$global:adminPass = ReadAdminPW
+		$global:cloudPW = ReadCloudPW
 		VerifyCloudSites
 	} else {
 		VerifyPSRemoting
 		ReadIISPW
-		$global:adminPass = ReadAdminPW
+		$global:cloudPW = ReadCloudPW
 		DetectVendor
 		CloseSession
-		OpenSession
+		CreateWorkers
 		CopySites
 		CloseSession
 		WriteCSV
@@ -450,10 +501,10 @@ Function Main() {
 	
 	# Finish LOG
 	Write-Host "===== DONE ===== $(Get-Date)" -Fore Yellow
-	$th = [Math]::Round(((Get-Date) - $start).TotalHours, 2)
-	$attemptMb = ($global:track |measure SPStorage -Sum).Sum
-	$actualMb = ($global:track |? {$_.SGSessionId -ne ""} |measure SPStorage -Sum).Sum
-	$actualSites = ($global:track |? {$_.SGSessionId -ne ""}).Count
+	$th				= [Math]::Round(((Get-Date) - $start).TotalHours, 2)
+	$attemptMb		= ($global:track |measure SPStorage -Sum).Sum
+	$actualMb		= ($global:track |? {$_.SGSessionId -ne ""} |measure SPStorage -Sum).Sum
+	$actualSites	= ($global:track |? {$_.SGSessionId -ne ""}).Count
 	Write-Host ("Duration Hours              : {0:N2}" -f $th) -Fore Yellow
 	Write-Host ("Total Sites Attempted       : {0}" -f $($global:track.count)) -Fore Green
 	Write-Host ("Total Sites Copied          : {0}" -f $actualSites) -Fore Green
