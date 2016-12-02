@@ -140,7 +140,7 @@ Function VerifySchtask($name, $file) {
 		$found | Unregister-ScheduledTask -Confirm:$false
 	}
 
-	$user = "domain\user"
+	$user = "domain\spfarm"
 	$pw = "password"
 	
 	$folder = Split-Path $file
@@ -243,8 +243,8 @@ Function UpdateTracker () {
 		$wid = $row.WorkerID
         $pc = $row.PC
 		
-		# Reconnect Broken
-		$b = Get-PSSession |? {$_.State -eq "Broken"}
+		# Reconnect Broken remote PS
+		$b = Get-PSSession |? {$_.State -ne "Opened"}
 		if ($b) {
 			# Make new session
 			New-PSSession -ComputerName $b.ComputerName -Credential $global:cred -Authentication CredSSP -ErrorAction SilentlyContinue
@@ -257,9 +257,11 @@ Function UpdateTracker () {
 		$s = Get-PSSession |? {$_.ComputerName -eq $pc}
 		$cmd = "Get-Scheduledtask -TaskName 'worker$wid'"
 		$sb = [Scriptblock]::Create($cmd)
+		$schtask = $null
 		$schtask = Invoke-Command -Session $s -Command $sb
 		if ($schtask) {
 			$schtask | select {$pc},TaskName,State | ft -a
+			Get-PSSession | ft -a
 			if ($schtask.State -eq 3) {
 				$row.Status = "Completed"
 				$row.TimeCopyEnd = (Get-Date).ToString()
@@ -313,7 +315,8 @@ Function ExecuteSiteCopy($row, $worker) {
 	$s = Get-PSSession |? {$_.ComputerName -eq $pc}
 	
 	# Generate PS1 worker script
-	$ps = "Start-Transcript ""d:\insanemove\log\worker$wid.log"";`n`$secpw=""$global:cloudPW"" | ConvertTo-SecureString -AsPlainText -Force;`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$result=Copy-Site -Site `$src -DestinationSite `$dest -Merge -InsaneMode -VersionLimit 100;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
+	$now = (Get-Date).tostring("yyyy-MM-dd_hh-mm-ss")
+	$ps = "md ""d:\insanemove\log"" -ErrorAction SilentlyContinue;`nStart-Transcript ""d:\insanemove\log\worker$wid-$now.log"";`n""SOURCE=$srcUrl"";`n""DESTINATION=$destUrl"";`n`$secpw=""$global:cloudPW"" | ConvertTo-SecureString -AsPlainText -Force;`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$result=Copy-Site -Site `$src -DestinationSite `$dest -Merge -InsaneMode -VersionLimit 100;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
     $ps | Out-File "\\$pc\d$\insanemove\worker$wid.ps1" -Force
     Write-Host $ps -Fore Yellow
 
@@ -414,6 +417,7 @@ Function CopySites() {
 Function VerifyCloudSites() {
 	# Read CSV and ensure cloud sites exists for each row
 	Write-Host "===== Verify Site Collections exist in O365 ===== $(Get-Date)" -Fore Yellow
+	$global:collMySite = @()
 	
 	# Connect-SPO
 	$secpw = ConvertTo-SecureString -String $global:cloudPW -AsPlainText -Force
@@ -424,11 +428,36 @@ Function VerifyCloudSites() {
 	$csv = Import-Csv $fileCSV
 	foreach ($row in $csv) {
 		$row | ft
-		EnsureCloudSite $row.SourceURL $row.DestinationURL $true
+		EnsureCloudSite $row.SourceURL $row.DestinationURL
 	}
+	
+	# Execute creation of OneDrive /personal/ sites in batches (200 each) https://technet.microsoft.com/en-us/library/dn792367.aspx
+	Write-Host " - PROCESS MySite bulk creation"
+	$i = 0
+	$batch = @()
+	foreach ($mysite in $global:collMySite) {
+		if ($i -lt 199) {
+			# append batch
+			$batch += $mysite
+			Write-Host "." -NoNewline
+		} else {
+			BulkCreateMysite $batch
+			$batch = @()
+		}
+	}
+	if ($batch) {
+		BulkCreateMysite $batch
+	}
+	Write-Host "OK"
 }
 
-Function EnsureCloudSite($srcUrl, $destUrl, $noWait) {
+Function BulkCreateMysite ($batch) {
+	# execute and clear batch
+	Write-Host "`nBATCH Request-MSPOPersonalSite $($batch.count)" -Fore Green
+	Request-SPOPersonalSite -UserEmails $batch -NoWait
+}
+
+Function EnsureCloudSite($srcUrl, $destUrl) {
 	# Create site in O365 if does not exist
 	$destUrl = FormatCloudMP $destUrl
 	Write-Host $destUrl -Fore Yellow
@@ -448,16 +477,20 @@ Function EnsureCloudSite($srcUrl, $destUrl, $noWait) {
 		$rae = $settings.settings.tenant.adminUser
 	}
 	
-	# Verisy SPOSite
+	# Verify SPOSite
 	try {
 		$cloud = Get-SPOSite $destUrl -ErrorAction SilentlyContinue
 	} catch {}
 	if (!$cloud) {
 		Write-Host "- CREATING $destUrl"
-		if ($noWait) {
-			New-SPOSite -Owner $rae -Url $destUrl -NoWait -StorageQuota (1024*50)
+		
+		if ($destUrl.Contains("-my.sharepoint.com")) {
+			# Provision MYSITE
+			$global:collMySite += $destUrl
 		} else {
-			New-SPOSite -Owner $rae -Url $destUrl -StorageQuota (1024*50)
+			# Provision TEAMSITE
+			$quota = 1024*50
+			New-SPOSite -Owner $rae -Url $destUrl -NoWait -StorageQuota $quota 
 		}
 	} else {
 		Write-Host "- FOUND $destUrl"
