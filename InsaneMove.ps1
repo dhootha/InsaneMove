@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.26
-	Last Modified	: 11-07-2016
+	Version			: 0.29
+	Last Modified	: 12-12-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -22,12 +22,25 @@ param (
 	
 	[Parameter(Mandatory=$false, ValueFromPipeline=$false, HelpMessage='Verify all Office 365 site collections.  Prep step before real migration.')]
 	[Alias("v")]
-	[switch]$verifyCloudSites = $false
+	[switch]$verifyCloudSites = $false,
+	
+	[Parameter(Mandatory=$false, ValueFromPipeline=$false, HelpMessage='Copy incremental changes only. http://help.share-gate.com/article/443-incremental-copy-copy-sharepoint-content')]
+	[Alias("i")]
+	[switch]$incremental = $false,
+	
+	[Parameter(Mandatory=$false, ValueFromPipeline=$false, HelpMessage='Measure size of site collections in GB.')]
+	[Alias("m")]
+	[switch]$measure = $false,
+	
+	[Parameter(Mandatory=$false, ValueFromPipeline=$false, HelpMessage='Send email notifications with summary of migration batch progress.')]
+	[Alias("e")]
+	[switch]$email = $false
 )
 
 # Plugin
 Add-PSSnapIn Microsoft.SharePoint.PowerShell -ErrorAction SilentlyContinue | Out-Null
-Import-Module Microsoft.Online.SharePoint.PowerShell -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Out-Null
+Import-Module Microsoft.Online.SharePoint.PowerShell -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -Prefix M | Out-Null
+Import-Module SharePointPnPPowerShellOnline -ErrorAction SilentlyContinue -WarningAction SilentlyContinue -Prefix P | Out-Null
 
 # Config
 $root = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
@@ -197,11 +210,18 @@ Function CreateTracker() {
 		if ($site) {
 			$SPStorage = [Math]::Round($site.Usage.Storage/1MB,2)
 		}
+		
+		# MySite URL Lookup
+		if ($row.MySiteEmail) {
+			$destUrl = FindCloudMySite $row.MySiteEmail
+		} else {
+			$destUrl = $row.DestinationURL;
+		}
 
 		# Add row
 		$obj = New-Object -TypeName PSObject -Prop (@{
 			"SourceURL"=$row.SourceURL;
-			"DestinationURL"=$row.DestinationURL;
+			"DestinationURL"=$destUrl;
 			"CsvID"=$i;
 			"WorkerID"=$j;
 			"PC"=$pc;
@@ -307,16 +327,33 @@ Function ExecuteSiteCopy($row, $worker) {
 	# Parse fields
 	$name = $row.Name
 	$srcUrl = $row.SourceURL
-	$destUrl = FormatCloudMP $row.DestinationURL
+	
+	# Destination
+	if ($row.MySiteEmail) {
+		# MySite /personal/
+		$destUrl = $row.DestinationURL
+	} else {
+		# Team /sites/
+		$destUrl = FormatCloudMP $row.DestinationURL
+	}
 	
 	# Make NEW Session - remote PowerShell
     $wid = $worker.Id	
     $pc = $worker.PC
 	$s = Get-PSSession |? {$_.ComputerName -eq $pc}
 	
+	# Generate local secure CloudPW
+	$sb = [Scriptblock]::Create("""$global:cloudPW"" | ConvertTo-SecureString -Force -AsPlainText | ConvertFrom-SecureString")
+	$localHash = Invoke-Command $sb -Session $s
+	
 	# Generate PS1 worker script
 	$now = (Get-Date).tostring("yyyy-MM-dd_hh-mm-ss")
-	$ps = "md ""d:\insanemove\log"" -ErrorAction SilentlyContinue;`nStart-Transcript ""d:\insanemove\log\worker$wid-$now.log"";`n""SOURCE=$srcUrl"";`n""DESTINATION=$destUrl"";`n`$secpw=""$global:cloudPW"" | ConvertTo-SecureString -AsPlainText -Force;`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$result=Copy-Site -Site `$src -DestinationSite `$dest -Merge -InsaneMode -VersionLimit 100;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
+	if ($incremental) {
+		$copyparam = "-CopySettings `$cs"
+	} else {
+		$copyparam = "-Merge"
+	}
+	$ps = "md ""d:\insanemove\log"" -ErrorAction SilentlyContinue;`nStart-Transcript ""d:\insanemove\log\worker$wid-$now.log"";`n""SOURCE=$srcUrl"";`n""DESTINATION=$destUrl"";`n`$secpw=ConvertTo-SecureString -String ""$localHash"";`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$cs = New-CopySettings -OnSiteObjectExists Merge -OnContentItemExists IncrementalUpdate;`n`$result=Copy-Site -Site `$src -DestinationSite `$dest $copyparam -InsaneMode -VersionLimit 50;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
     $ps | Out-File "\\$pc\d$\insanemove\worker$wid.ps1" -Force
     Write-Host $ps -Fore Yellow
 
@@ -330,6 +367,16 @@ Function ExecuteSiteCopy($row, $worker) {
 	# Execute
 	$sb = [Scriptblock]::Create($cmd) 
 	return Invoke-Command $sb -Session $s
+}
+
+Function FindCloudMySite ($MySiteEmail) {
+	# Lookup /personal/ site URL based on User Principal Name (UPN)
+	$coll = @()
+	$coll += $MySiteEmail
+	$profile = Get-PSPOUserProfileProperty -Account $coll
+	$url = $profile.PersonalUrl
+	Write-Host "SEARCH for $MySiteEmail found URL $url" -Fore Yellow
+	return $url
 }
 
 Function WriteCSV() {
@@ -417,28 +464,24 @@ Function CopySites() {
 Function VerifyCloudSites() {
 	# Read CSV and ensure cloud sites exists for each row
 	Write-Host "===== Verify Site Collections exist in O365 ===== $(Get-Date)" -Fore Yellow
-	$global:collMySite = @()
-	
-	# Connect-SPO
-	$secpw = ConvertTo-SecureString -String $global:cloudPW -AsPlainText -Force
-	$c = New-Object System.Management.Automation.PSCredential ($settings.settings.tenant.adminUser, $secpw)
-	Connect-SPOService -URL $settings.settings.tenant.adminURL -Credential $c
+	$global:collMySiteEmail = @()
+
 	
 	# Loop CSV
 	$csv = Import-Csv $fileCSV
 	foreach ($row in $csv) {
 		$row | ft
-		EnsureCloudSite $row.SourceURL $row.DestinationURL
+		EnsureCloudSite $row.SourceURL $row.DestinationURL $row.MySiteEmail
 	}
 	
 	# Execute creation of OneDrive /personal/ sites in batches (200 each) https://technet.microsoft.com/en-us/library/dn792367.aspx
 	Write-Host " - PROCESS MySite bulk creation"
 	$i = 0
 	$batch = @()
-	foreach ($mysite in $global:collMySite) {
+	foreach ($MySiteEmail in $global:collMySiteEmail) {
 		if ($i -lt 199) {
 			# append batch
-			$batch += $mysite
+			$batch += $MySiteEmail
 			Write-Host "." -NoNewline
 		} else {
 			BulkCreateMysite $batch
@@ -454,10 +497,11 @@ Function VerifyCloudSites() {
 Function BulkCreateMysite ($batch) {
 	# execute and clear batch
 	Write-Host "`nBATCH Request-MSPOPersonalSite $($batch.count)" -Fore Green
-	Request-SPOPersonalSite -UserEmails $batch -NoWait
+	$batch
+	Request-MSPOPersonalSite -UserEmails $batch -NoWait
 }
 
-Function EnsureCloudSite($srcUrl, $destUrl) {
+Function EnsureCloudSite($srcUrl, $destUrl, $MySiteEmail) {
 	# Create site in O365 if does not exist
 	$destUrl = FormatCloudMP $destUrl
 	Write-Host $destUrl -Fore Yellow
@@ -471,7 +515,7 @@ Function EnsureCloudSite($srcUrl, $destUrl) {
 	
 	# Verify SPOUser
      try {
-	    $u = Get-SPOUser -Site $settings.settings.tenant.adminURL -LoginName $rae -ErrorAction SilentlyContinue
+	    $u = Get-MSPOUser -Site $settings.settings.tenant.adminURL -LoginName $rae -ErrorAction SilentlyContinue
     } catch {}
 	if (!$u) {
 		$rae = $settings.settings.tenant.adminUser
@@ -479,18 +523,18 @@ Function EnsureCloudSite($srcUrl, $destUrl) {
 	
 	# Verify SPOSite
 	try {
-		$cloud = Get-SPOSite $destUrl -ErrorAction SilentlyContinue
+		$cloud = Get-MSPOSite $destUrl -ErrorAction SilentlyContinue
 	} catch {}
 	if (!$cloud) {
 		Write-Host "- CREATING $destUrl"
 		
-		if ($destUrl.Contains("-my.sharepoint.com")) {
+		if ($MySiteEmail) {
 			# Provision MYSITE
-			$global:collMySite += $destUrl
+			$global:collMySiteEmail += $MySiteEmail
 		} else {
 			# Provision TEAMSITE
 			$quota = 1024*50
-			New-SPOSite -Owner $rae -Url $destUrl -NoWait -StorageQuota $quota 
+			New-MSPOSite -Owner $rae -Url $destUrl -NoWait -StorageQuota $quota 
 		}
 	} else {
 		Write-Host "- FOUND $destUrl"
@@ -499,12 +543,37 @@ Function EnsureCloudSite($srcUrl, $destUrl) {
 
 Function FormatCloudMP($url) {
 	# Replace Managed Path with O365 /sites/ only
+	if (!$url) {return}
 	$managedPath = "sites"
 	$i = $url.indexOf("://")+3
 	$split = $url.substring($i, $url.length-$i).Split("/")
 	$split[1] = $managedPath
 	$final = ($url.substring(0,$i) + ($split -join "/")).replace("http:","https:")
 	return $final
+}
+
+Function ConnectCloud {
+	# Connect SPO
+	$secpw = ConvertTo-SecureString -String $global:cloudPW -AsPlainText -Force
+	$c = New-Object System.Management.Automation.PSCredential ($settings.settings.tenant.adminUser, $secpw)
+	Connect-MSPOService -URL $settings.settings.tenant.adminURL -Credential $c
+	$firstUrl = (Get-MSPOSite)[0].Url
+	
+	# Connect PNP
+	Connect-PSPOnline -URL $firstUrl -Credential $c
+}
+
+Function MeasureSiteCSV {
+	# Populate CSV with local farm SharePoint site collection size
+	$csv = Import-Csv $fileCSV
+	foreach ($row in $csv) {
+		$s = Get-SPSite $row.SourceURL
+		if ($s) {
+			$storage = [Math]::Round($s.Usage.Storage/1GB, 2)
+			$row.SPStorage = $storage
+		}
+	}
+	$csv | Export-Csv $fileCSV -Force
 }
 
 Function Main() {
@@ -516,14 +585,23 @@ Function Main() {
 	if (!$psISE) {Start-Transcript $logFile}
 	Write-Host "fileCSV = $fileCSV"
 
-	# Core
+	# Core logic
+	if ($measure) {
+		# Populate CSV with size (GB)
+		MeasureSiteCSV
+		Exit
+	}
 	if ($verifyCloudSites) {
+		# Create site collection
 		$global:cloudPW = ReadCloudPW
+		ConnectCloud
 		VerifyCloudSites
 	} else {
+		# Copy site content
 		VerifyPSRemoting
 		ReadIISPW
 		$global:cloudPW = ReadCloudPW
+		ConnectCloud
 		DetectVendor
 		CloseSession
 		CreateWorkers
