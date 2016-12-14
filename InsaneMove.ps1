@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.29
-	Last Modified	: 12-12-2016
+	Version			: 0.32
+	Last Modified	: 12-14-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -34,7 +34,19 @@ param (
 	
 	[Parameter(Mandatory=$false, ValueFromPipeline=$false, HelpMessage='Send email notifications with summary of migration batch progress.')]
 	[Alias("e")]
-	[switch]$email = $false
+	[switch]$email = $false,
+	
+	[Parameter(Mandatory=$false, ValueFromPipeline=$false, HelpMessage='Lock sites read-only.')]
+	[Alias("ro")]
+	[switch]$readOnly = $false,
+	
+	[Parameter(Mandatory=$false, ValueFromPipeline=$false, HelpMessage='Unlock sites read-write.')]
+	[Alias("rw")]
+	[switch]$readWrite = $false,
+	
+	[Parameter(Mandatory=$false, ValueFromPipeline=$false, HelpMessage='Grant Site Collection Admin rights to the migration user specified in XML settings file.')]
+	[Alias("sca")]
+	[switch]$siteCollectionAdmin = $false
 )
 
 # Plugin
@@ -129,6 +141,12 @@ Function DetectVendor() {
 	# Display and return
 	$coll |% {Write-Host $_ -Fore Green}
 	$global:servers = $coll
+	
+	# Safety
+	if (!$coll) {
+		Write-Host "No Servers Have ShareGate Installed.  Please Verify." -Fore Red
+		Exit
+	}
 }
 
 Function ReadCloudPW() {
@@ -179,7 +197,7 @@ VerifySchtask "worker1" "d:\InsaneMove\worker1.ps1"
             Write-Host "CREATE Worker$i on $pc ..." -Fore Yellow
             $sb = [Scriptblock]::Create($curr)
             $result = Invoke-Command -Session $s -ScriptBlock $sb
-            $result | ft
+            $result | ft -a
 			
 			# purge old worker XML output
 			$resultfile = "\\$pc\d$\insanemove\worker$i.xml"
@@ -191,7 +209,7 @@ VerifySchtask "worker1" "d:\InsaneMove\worker1.ps1"
 			$i++
 		}
 	}
-	$global:workers | ft
+	$global:workers | ft -a
 }
 
 Function CreateTracker() {
@@ -222,6 +240,7 @@ Function CreateTracker() {
 		$obj = New-Object -TypeName PSObject -Prop (@{
 			"SourceURL"=$row.SourceURL;
 			"DestinationURL"=$destUrl;
+			"MySiteEmail"=$row.MySiteEmail;
 			"CsvID"=$i;
 			"WorkerID"=$j;
 			"PC"=$pc;
@@ -374,7 +393,7 @@ Function FindCloudMySite ($MySiteEmail) {
 	$coll = @()
 	$coll += $MySiteEmail
 	$profile = Get-PSPOUserProfileProperty -Account $coll
-	$url = $profile.PersonalUrl
+	$url = $profile.PersonalUrl.TrimEnd('/')
 	Write-Host "SEARCH for $MySiteEmail found URL $url" -Fore Yellow
 	return $url
 }
@@ -382,13 +401,19 @@ Function FindCloudMySite ($MySiteEmail) {
 Function WriteCSV() {
     # Write new CSV output with detailed results
     $file = $fileCSV.Replace(".csv", "-results.csv")
-    $global:track | select SourceURL,DestinationURL,CsvID,WorkerID,PC,Status,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors,Error,ErrorCount,TaskXML,SPStorage | Export-Csv $file -NoTypeInformation -Force
+    $global:track | select SourceURL,DestinationURL,MySiteEmail,CsvID,WorkerID,PC,Status,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors,Error,ErrorCount,TaskXML,SPStorage | Export-Csv $file -NoTypeInformation -Force
 }
 
 Function CopySites() {
 	# Monitor and Run loop
 	Write-Host "===== Start Site Copy to O365 ===== $(Get-Date)" -Fore Yellow
 	CreateTracker
+	
+	# Safety
+	if (!$global:workers) {
+		Write-Host "No Workers Found" -Fore Red
+		return
+	}
 	
 	$i = 0
 	do {
@@ -470,7 +495,7 @@ Function VerifyCloudSites() {
 	# Loop CSV
 	$csv = Import-Csv $fileCSV
 	foreach ($row in $csv) {
-		$row | ft
+		$row | ft -a
 		EnsureCloudSite $row.SourceURL $row.DestinationURL $row.MySiteEmail
 	}
 	
@@ -496,7 +521,7 @@ Function VerifyCloudSites() {
 
 Function BulkCreateMysite ($batch) {
 	# execute and clear batch
-	Write-Host "`nBATCH Request-MSPOPersonalSite $($batch.count)" -Fore Green
+	Write-Host "`nBATCH Request-SPOPersonalSite $($batch.count)" -Fore Green
 	$batch
 	Request-MSPOPersonalSite -UserEmails $batch -NoWait
 }
@@ -515,7 +540,7 @@ Function EnsureCloudSite($srcUrl, $destUrl, $MySiteEmail) {
 	
 	# Verify SPOUser
      try {
-	    $u = Get-MSPOUser -Site $settings.settings.tenant.adminURL -LoginName $rae -ErrorAction SilentlyContinue
+	    $u = Get-SPOUser -Site $settings.settings.tenant.adminURL -LoginName $rae -ErrorAction SilentlyContinue
     } catch {}
 	if (!$u) {
 		$rae = $settings.settings.tenant.adminUser
@@ -523,7 +548,7 @@ Function EnsureCloudSite($srcUrl, $destUrl, $MySiteEmail) {
 	
 	# Verify SPOSite
 	try {
-		$cloud = Get-MSPOSite $destUrl -ErrorAction SilentlyContinue
+		$cloud = Get-SPOSite $destUrl -ErrorAction SilentlyContinue
 	} catch {}
 	if (!$cloud) {
 		Write-Host "- CREATING $destUrl"
@@ -534,7 +559,7 @@ Function EnsureCloudSite($srcUrl, $destUrl, $MySiteEmail) {
 		} else {
 			# Provision TEAMSITE
 			$quota = 1024*50
-			New-MSPOSite -Owner $rae -Url $destUrl -NoWait -StorageQuota $quota 
+			New-SPOSite -Owner $rae -Url $destUrl -NoWait -StorageQuota $quota 
 		}
 	} else {
 		Write-Host "- FOUND $destUrl"
@@ -545,10 +570,10 @@ Function FormatCloudMP($url) {
 	# Replace Managed Path with O365 /sites/ only
 	if (!$url) {return}
 	$managedPath = "sites"
-	$i = $url.indexOf("://")+3
-	$split = $url.substring($i, $url.length-$i).Split("/")
+	$i = $url.Indexof("://")+3
+	$split = $url.SubString($i, $url.length-$i).Split("/")
 	$split[1] = $managedPath
-	$final = ($url.substring(0,$i) + ($split -join "/")).replace("http:","https:")
+	$final = ($url.SubString(0,$i) + ($split -join "/")).Replace("http:","https:")
 	return $final
 }
 
@@ -556,11 +581,11 @@ Function ConnectCloud {
 	# Connect SPO
 	$secpw = ConvertTo-SecureString -String $global:cloudPW -AsPlainText -Force
 	$c = New-Object System.Management.Automation.PSCredential ($settings.settings.tenant.adminUser, $secpw)
+	Connect-PSPOnline -URL $settings.settings.tenant.adminURL -Credential $c
 	Connect-MSPOService -URL $settings.settings.tenant.adminURL -Credential $c
-	$firstUrl = (Get-MSPOSite)[0].Url
 	
+	#$firstUrl = (Get-SPOSite)[0].Url
 	# Connect PNP
-	Connect-PSPOnline -URL $firstUrl -Credential $c
 }
 
 Function MeasureSiteCSV {
@@ -576,6 +601,32 @@ Function MeasureSiteCSV {
 	$csv | Export-Csv $fileCSV -Force
 }
 
+Function LockSite($lock) {
+	# Modfiy on-prem site collection lock
+	Write-Host $lock -Fore Yellow
+	$csv = Import-Csv $fileCSV
+	foreach ($row in $csv) {
+		$url = $row.SourceURL
+		Set-SPSite $url -LockState $lock
+		Get-SPSite $url | Select URL,*Lock* | ft -a
+	}
+}
+
+Function SiteCollectionAdmin($user) {
+	# Grant site collection admin rights
+	$csv = Import-Csv $fileCSV
+	foreach ($row in $csv) {
+		if ($row.MySiteEmail) {
+			$url = FindCloudMySite $row.MySiteEmail
+		} else  {
+			$url = $row.DestinationURL.TrimEnd('/')
+		}
+		$url
+		$site = Get-MSPOSite $url
+		Set-MSPOUser -Site $site -LoginName $user -IsSiteCollectionAdmin $true
+	}
+}
+
 Function Main() {
 	# Start LOG
 	$start = Get-Date
@@ -589,25 +640,36 @@ Function Main() {
 	if ($measure) {
 		# Populate CSV with size (GB)
 		MeasureSiteCSV
-		Exit
-	}
-	if ($verifyCloudSites) {
-		# Create site collection
+	} elseif ($readOnly) {
+		# Lock on-prem sites
+		LockSite "ReadOnly"
+	} elseif ($readWrite) {
+		# Unlock on-prem sites
+		LockSite "Unlock"
+	} elseif ($siteCollectionAdmin) {
+		# Grant cloud sites SCA permission to XML migration cloud user
 		$global:cloudPW = ReadCloudPW
 		ConnectCloud
-		VerifyCloudSites
+		SiteCollectionAdmin $settings.settings.tenant.adminUser
 	} else {
-		# Copy site content
-		VerifyPSRemoting
-		ReadIISPW
-		$global:cloudPW = ReadCloudPW
-		ConnectCloud
-		DetectVendor
-		CloseSession
-		CreateWorkers
-		CopySites
-		CloseSession
-		WriteCSV
+		if ($verifyCloudSites) {
+			# Create site collection
+			$global:cloudPW = ReadCloudPW
+			ConnectCloud
+			VerifyCloudSites
+		} else {
+			# Copy site content
+			VerifyPSRemoting
+			ReadIISPW
+			$global:cloudPW = ReadCloudPW
+			ConnectCloud
+			DetectVendor
+			CloseSession
+			CreateWorkers
+			CopySites
+			CloseSession
+			WriteCSV
+		}
 	}
 	
 	# Finish LOG
