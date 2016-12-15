@@ -42,6 +42,8 @@ ShareGate offers “insane mode” which uploads to Azure blob storage for fast 
 * -sca[switch]$siteCollectionAdmin = Grant Site Collection Admin rights to the migration user specified in XML settings file.
 
 ## Screenshots
+![image](https://raw.githubusercontent.com/spjeff/InsaneMove/master/doc/rocket.png)
+
 ![image](https://raw.githubusercontent.com/spjeff/InsaneMove/master/doc/diagram.png)
 
 ![image](https://raw.githubusercontent.com/spjeff/InsaneMove/master/doc/1.png)
