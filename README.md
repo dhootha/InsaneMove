@@ -25,21 +25,21 @@ ShareGate offers “insane mode” which uploads to Azure blob storage for fast 
 * Sit back and enjoy!
 
 ## Parameters
-* `[string]$fileCSV` = CSV list of source and destination SharePoint site URLs to copy to Office 365.
+* `[string]$fileCSV` > CSV list of source and destination SharePoint site URLs to copy to Office 365.
 	
-* `-v[switch]$verifyCloudSites` = Verify all Office 365 site collections.  Prep step before real migration.
+* `-v[switch]$verifyCloudSites` > Verify all Office 365 site collections.  Prep step before real migration.
 
-* `-i[switch]$incremental` = Copy incremental changes only. http://help.share-gate.com/article/443-incremental-copy-copy-sharepoint-content
+* `-i[switch]$incremental` > Copy incremental changes only. http://help.share-gate.com/article/443-incremental-copy-copy-sharepoint-content
 
-* `-m[switch]$measure` = Measure size of site collections in GB.
+* `-m[switch]$measure` > Measure size of site collections in GB.
 
-* `-e[switch]$email` = Send email notifications with summary of migration batch progress.
+* `-e[switch]$email` > Send email notifications with summary of migration batch progress.
 
-* `-ro[switch]$readOnly` = Lock sites read-only.
+* `-ro[switch]$readOnly` > Lock sites read-only.
 
-* `-rw[switch]$readWrite` = Unlock sites read-write.
+* `-rw[switch]$readWrite` > Unlock sites read-write.
 
-* `-sca[switch]$siteCollectionAdmin` = Grant Site Collection Admin rights to the migration user specified in XML settings file.
+* `-sca[switch]$siteCollectionAdmin` > Grant Site Collection Admin rights to the migration user specified in XML settings file.
 
 ## Screenshots
 ![image](https://raw.githubusercontent.com/spjeff/InsaneMove/master/doc/rocket.png)
