@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.32
-	Last Modified	: 12-14-2016
+	Version			: 0.33
+	Last Modified	: 12-20-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -171,7 +171,7 @@ Function VerifySchtask($name, $file) {
 		$found | Unregister-ScheduledTask -Confirm:$false
 	}
 
-	$user = "domain\spfarm"
+	$user = "domain\farm"
 	$pw = "password"
 	
 	$folder = Split-Path $file
@@ -197,6 +197,7 @@ VerifySchtask "worker1" "d:\InsaneMove\worker1.ps1"
             Write-Host "CREATE Worker$i on $pc ..." -Fore Yellow
             $sb = [Scriptblock]::Create($curr)
             $result = Invoke-Command -Session $s -ScriptBlock $sb
+			"[RESULT]"
             $result | ft -a
 			
 			# purge old worker XML output
@@ -209,6 +210,7 @@ VerifySchtask "worker1" "d:\InsaneMove\worker1.ps1"
 			$i++
 		}
 	}
+	"WORKERS"
 	$global:workers | ft -a
 }
 
@@ -271,6 +273,7 @@ Function CreateTracker() {
 	}
 	
 	# Display
+	"[SESSION]"
 	Get-PSSession | ft -a
 }
 
@@ -299,7 +302,9 @@ Function UpdateTracker () {
 		$schtask = $null
 		$schtask = Invoke-Command -Session $s -Command $sb
 		if ($schtask) {
+			"[SCHTASK]"
 			$schtask | select {$pc},TaskName,State | ft -a
+			"[SESSION]"
 			Get-PSSession | ft -a
 			if ($schtask.State -eq 3) {
 				$row.Status = "Completed"
@@ -372,7 +377,7 @@ Function ExecuteSiteCopy($row, $worker) {
 	} else {
 		$copyparam = "-Merge"
 	}
-	$ps = "md ""d:\insanemove\log"" -ErrorAction SilentlyContinue;`nStart-Transcript ""d:\insanemove\log\worker$wid-$now.log"";`n""SOURCE=$srcUrl"";`n""DESTINATION=$destUrl"";`n`$secpw=ConvertTo-SecureString -String ""$localHash"";`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$cs = New-CopySettings -OnSiteObjectExists Merge -OnContentItemExists IncrementalUpdate;`n`$result=Copy-Site -Site `$src -DestinationSite `$dest $copyparam -InsaneMode -VersionLimit 50;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
+	$ps = "md ""d:\insanemove\log"" -ErrorAction SilentlyContinue;`nStart-Transcript ""d:\insanemove\log\worker$wid-$now.log"";`n""SOURCE=$srcUrl"";`n""DESTINATION=$destUrl"";`n`$secpw=ConvertTo-SecureString -String ""$localHash"";`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$cs = New-CopySettings -OnSiteObjectExists Merge -OnContentItemExists IncrementalUpdate;`n`$result = Copy-Site -Site `$src -DestinationSite `$dest -Subsites $copyparam -InsaneMode -VersionLimit 50;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
     $ps | Out-File "\\$pc\d$\insanemove\worker$wid.ps1" -Force
     Write-Host $ps -Fore Yellow
 
@@ -464,6 +469,7 @@ Function CopySites() {
 			Write-Progress -Activity "Copy site - ETA $eta" -Status "$name ($prct %)" -PercentComplete $prct
 
 			# Detail table
+			"[TRACK]"
 			$global:track |? {$_.Status -eq "InProgress"} | select CsvID,WorkerID,PC,SourceURL,DestinationURL | ft -a
 			$grp = $global:track | group Status
 			$grp | select Count,Name | sort Name | ft -a
@@ -482,6 +488,7 @@ Function CopySites() {
 	
 	# Complete
 	Write-Host "===== Finish Site Copy to O365 ===== $(Get-Date)" -Fore Yellow
+	"[TRACK]"
 	$global:track | group status | ft -a
 	$global:track | select CsvID,JobID,SessionID,SGSessionId,PC,SourceURL,DestinationURL | ft -a
 }
@@ -530,6 +537,7 @@ Function EnsureCloudSite($srcUrl, $destUrl, $MySiteEmail) {
 	# Create site in O365 if does not exist
 	$destUrl = FormatCloudMP $destUrl
 	Write-Host $destUrl -Fore Yellow
+	$srcUrl
 	$web = (Get-SPSite $srcUrl).RootWeb
 	if ($web.RequestAccessEmail) {
 		$rae = $web.RequestAccessEmail.Split(",;")[0].Split("@")[0] + "@" + $settings.settings.tenant.suffix;
@@ -608,6 +616,7 @@ Function LockSite($lock) {
 	foreach ($row in $csv) {
 		$url = $row.SourceURL
 		Set-SPSite $url -LockState $lock
+		"[SPSITE]"
 		Get-SPSite $url | Select URL,*Lock* | ft -a
 	}
 }
