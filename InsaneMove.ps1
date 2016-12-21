@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.33
-	Last Modified	: 12-20-2016
+	Version			: 0.34
+	Last Modified	: 12-21-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -132,9 +132,7 @@ Function DetectVendor() {
 	foreach ($s in $spservers) {
 		$found = Get-ChildItem "\\$($s.Address)\C$\Program Files (x86)\Sharegate\Sharegate.exe" -ErrorAction SilentlyContinue
 		if ($found) {
-            #if ($s.Address -ne "PWSYS-APSP-03") {
-			    $coll += $s.Address
-            #}
+			$coll += $s.Address
 		}
 	}
 	
