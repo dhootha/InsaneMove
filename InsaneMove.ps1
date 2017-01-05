@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.34
-	Last Modified	: 12-21-2016
+	Version			: 0.36
+	Last Modified	: 01-05-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -60,6 +60,7 @@ $root = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
 $maxWorker = $settings.settings.maxWorker
 
 Function VerifyPSRemoting() {
+	"<VerifyPSRemoting>"
 	$ssp = Get-WSManCredSSP
 	if ($ssp[0] -match "not configured to allow delegating") {
 		# Enable remote PowerShell over CredSSP authentication
@@ -69,6 +70,7 @@ Function VerifyPSRemoting() {
 }
 
 Function ReadIISPW {
+	"<ReadIISPW>"
 	# Read IIS password for current logged in user
 	Write-Host "===== Read IIS PW ===== $(Get-Date)" -Fore Yellow
 
@@ -124,6 +126,7 @@ Function ReadIISPW {
 }
 
 Function DetectVendor() {
+	"<DetectVendor>"
 	# SharePoint Servers in local farm
 	$spservers = Get-SPServer |? {$_.Role -ne "Invalid"} | sort Address
 
@@ -148,16 +151,19 @@ Function DetectVendor() {
 }
 
 Function ReadCloudPW() {
+	"<ReadCloudPW>"
 	# Prompt for admin password
-    return (Read-Host "Enter O365 Cloud Password for $($settings.settings.tenant.adminUser)")
+    $global:cloudPW = Read-Host "Enter O365 Cloud Password for $($settings.settings.tenant.adminUser)"
 }
 
 Function CloseSession() {
+	"<CloseSession>"
 	# Close remote PS sessions
 	Get-PSSession | Remove-PSSession
 }
 
 Function CreateWorkers() {
+	"<CreateWorkers>"
 	# Open worker sessions per server.  Runspace to create local SCHTASK on remote PC
     # Template command
     $cmd = @'
@@ -213,6 +219,7 @@ VerifySchtask "worker1" "d:\InsaneMove\worker1.ps1"
 }
 
 Function CreateTracker() {
+	"<CreateTracker>"
 	# CSV migration source/destination URL
 	Write-Host "===== Populate Tracking table ===== $(Get-Date)" -Fore Yellow
 	$i = 0	
@@ -271,11 +278,12 @@ Function CreateTracker() {
 	}
 	
 	# Display
-	"[SESSION]"
+	"[SESSION-CreateTracker]"
 	Get-PSSession | ft -a
 }
 
 Function UpdateTracker () {
+	"<UpdateTracker>"
 	# Update tracker with latest SCHTASK status
 	$active = $global:track |? {$_.Status -eq "InProgress"}
 	foreach ($row in $active) {
@@ -302,7 +310,7 @@ Function UpdateTracker () {
 		if ($schtask) {
 			"[SCHTASK]"
 			$schtask | select {$pc},TaskName,State | ft -a
-			"[SESSION]"
+			"[SESSION-UpdateTracker]"
 			Get-PSSession | ft -a
 			if ($schtask.State -eq 3) {
 				$row.Status = "Completed"
@@ -371,11 +379,17 @@ Function ExecuteSiteCopy($row, $worker) {
 	# Generate PS1 worker script
 	$now = (Get-Date).tostring("yyyy-MM-dd_hh-mm-ss")
 	if ($incremental) {
+		# Team site INCREMENTAL
 		$copyparam = "-CopySettings `$cs"
 	} else {
+		# Team Site FULL
 		$copyparam = "-Merge"
 	}
-	$ps = "md ""d:\insanemove\log"" -ErrorAction SilentlyContinue;`nStart-Transcript ""d:\insanemove\log\worker$wid-$now.log"";`n""SOURCE=$srcUrl"";`n""DESTINATION=$destUrl"";`n`$secpw=ConvertTo-SecureString -String ""$localHash"";`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$cs = New-CopySettings -OnSiteObjectExists Merge -OnContentItemExists IncrementalUpdate;`n`$result = Copy-Site -Site `$src -DestinationSite `$dest -Subsites $copyparam -InsaneMode -VersionLimit 50;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
+	if ($row.MySiteEmail) {
+		# MySite /personal/ = always RENAME
+		$copyparam = "-CopySettings `$csMysite"
+	}
+	$ps = "md ""d:\insanemove\log"" -ErrorAction SilentlyContinue;`nStart-Transcript ""d:\insanemove\log\worker$wid-$now.log"";`n""SOURCE=$srcUrl"";`n""DESTINATION=$destUrl"";`n`$secpw=ConvertTo-SecureString -String ""$localHash"";`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$csMysite = New-CopySettings -OnSiteObjectExists Merge -OnContentItemExists Rename;`n`$cs = New-CopySettings -OnSiteObjectExists Merge -OnContentItemExists IncrementalUpdate;`n`$result = Copy-Site -Site `$src -DestinationSite `$dest -Subsites $copyparam -InsaneMode -VersionLimit 50;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
     $ps | Out-File "\\$pc\d$\insanemove\worker$wid.ps1" -Force
     Write-Host $ps -Fore Yellow
 
@@ -402,12 +416,14 @@ Function FindCloudMySite ($MySiteEmail) {
 }
 
 Function WriteCSV() {
+	"<WriteCSV>"
     # Write new CSV output with detailed results
     $file = $fileCSV.Replace(".csv", "-results.csv")
-    $global:track | select SourceURL,DestinationURL,MySiteEmail,CsvID,WorkerID,PC,Status,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors,Error,ErrorCount,TaskXML,SPStorage | Export-Csv $file -NoTypeInformation -Force
+    $global:track | Select SourceURL,DestinationURL,MySiteEmail,CsvID,WorkerID,PC,Status,SGResult,SGServer,SGSessionId,SGSiteObjectsCopied,SGItemsCopied,SGWarnings,SGErrors,Error,ErrorCount,TaskXML,SPStorage | Export-Csv $file -NoTypeInformation -Force -ErrorAction Continue
 }
 
 Function CopySites() {
+	"<CopySites>"
 	# Monitor and Run loop
 	Write-Host "===== Start Site Copy to O365 ===== $(Get-Date)" -Fore Yellow
 	CreateTracker
@@ -418,9 +434,9 @@ Function CopySites() {
 		return
 	}
 	
-	$i = 0
+	$csvCounter = 0
 	do {
-		$i++
+		$csvCounter++
 		# Get latest Job status
 		UpdateTracker
 		Write-Host "." -NoNewline
@@ -442,7 +458,8 @@ Function CopySites() {
                     }
 
                     # Kick off copy
-					Sleep 5
+					Start-Sleep 5
+					"sleep 5 sec..."
 				    $result = ExecuteSiteCopy $row $worker
 
 				    # Update DB tracking
@@ -473,15 +490,16 @@ Function CopySites() {
 			$grp | select Count,Name | sort Name | ft -a
 		}
 		
-		# Write Csv
-		if ($i -gt 5) {
+		# Write CSV with partial results.  Enables monitoring long runs.
+		if ($csvCounter -gt 5) {
 			WriteCSV
-			$i = 0
+			$csvCounter = 0
 		}
 
 		# Latest counter
 		$remain = $global:track |? {$_.status -ne "Completed" -and $_.status -ne "Failed"}
-		sleep 5
+		Start-Sleep 5
+		"sleep 5 sec..."
 	} while ($remain)
 	
 	# Complete
@@ -492,6 +510,7 @@ Function CopySites() {
 }
 
 Function VerifyCloudSites() {
+	"<VerifyCloudSites>"
 	# Read CSV and ensure cloud sites exists for each row
 	Write-Host "===== Verify Site Collections exist in O365 ===== $(Get-Date)" -Fore Yellow
 	$global:collMySiteEmail = @()
@@ -525,6 +544,7 @@ Function VerifyCloudSites() {
 }
 
 Function BulkCreateMysite ($batch) {
+	"<BulkCreateMysite>"
 	# execute and clear batch
 	Write-Host "`nBATCH Request-SPOPersonalSite $($batch.count)" -Fore Green
 	$batch
@@ -532,6 +552,7 @@ Function BulkCreateMysite ($batch) {
 }
 
 Function EnsureCloudSite($srcUrl, $destUrl, $MySiteEmail) {
+	"<EnsureCloudSite>"
 	# Create site in O365 if does not exist
 	$destUrl = FormatCloudMP $destUrl
 	Write-Host $destUrl -Fore Yellow
@@ -584,8 +605,12 @@ Function FormatCloudMP($url) {
 }
 
 Function ConnectCloud {
+	"<ConnectCloud>"
 	# Connect SPO
-	$secpw = ConvertTo-SecureString -String $global:cloudPW -AsPlainText -Force
+	$pw = $global:cloudPW
+	$pw
+	$settings.settings.tenant.adminUser
+	$secpw = ConvertTo-SecureString -String $pw -AsPlainText -Force
 	$c = New-Object System.Management.Automation.PSCredential ($settings.settings.tenant.adminUser, $secpw)
 	Connect-PSPOnline -URL $settings.settings.tenant.adminURL -Credential $c
 	Connect-MSPOService -URL $settings.settings.tenant.adminURL -Credential $c
@@ -595,6 +620,7 @@ Function ConnectCloud {
 }
 
 Function MeasureSiteCSV {
+	"<MeasureSiteCSV>"
 	# Populate CSV with local farm SharePoint site collection size
 	$csv = Import-Csv $fileCSV
 	foreach ($row in $csv) {
@@ -608,6 +634,7 @@ Function MeasureSiteCSV {
 }
 
 Function LockSite($lock) {
+	"<LockSite>"
 	# Modfiy on-prem site collection lock
 	Write-Host $lock -Fore Yellow
 	$csv = Import-Csv $fileCSV
@@ -620,6 +647,7 @@ Function LockSite($lock) {
 }
 
 Function SiteCollectionAdmin($user) {
+	"<SiteCollectionAdmin>"
 	# Grant site collection admin rights
 	$csv = Import-Csv $fileCSV
 	foreach ($row in $csv) {
@@ -635,6 +663,7 @@ Function SiteCollectionAdmin($user) {
 }
 
 Function Main() {
+	"<Main>"
 	# Start LOG
 	$start = Get-Date
 	$when = $start.ToString("yyyy-MM-dd-hh-mm-ss")
@@ -655,20 +684,20 @@ Function Main() {
 		LockSite "Unlock"
 	} elseif ($siteCollectionAdmin) {
 		# Grant cloud sites SCA permission to XML migration cloud user
-		$global:cloudPW = ReadCloudPW
+		ReadCloudPW
 		ConnectCloud
 		SiteCollectionAdmin $settings.settings.tenant.adminUser
 	} else {
 		if ($verifyCloudSites) {
 			# Create site collection
-			$global:cloudPW = ReadCloudPW
+			ReadCloudPW
 			ConnectCloud
 			VerifyCloudSites
 		} else {
 			# Copy site content
 			VerifyPSRemoting
 			ReadIISPW
-			$global:cloudPW = ReadCloudPW
+			ReadCloudPW
 			ConnectCloud
 			DetectVendor
 			CloseSession
