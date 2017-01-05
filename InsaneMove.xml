@@ -4,10 +4,6 @@
 		<adminURL>https://tenant-admin.sharepoint.com</adminURL>
 		<adminUser>admin@tenant.onmicrosoft.com</adminUser>
 	</tenant>
-	<siteLock>
-		<readOnlyBeforeCopy>$false</readOnlyBeforeCopy>
-		<noAccessAfterCopy>$false</noAccessAfterCopy>
-	</siteLock>
 	<maxWorker>4</maxWorker>
 	<notify>
 		<smtp>mailhub</smtp>
