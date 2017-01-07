@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.36
-	Last Modified	: 01-05-2016
+	Version			: 0.40
+	Last Modified	: 01-06-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -380,16 +380,13 @@ Function ExecuteSiteCopy($row, $worker) {
 	$now = (Get-Date).tostring("yyyy-MM-dd_hh-mm-ss")
 	if ($incremental) {
 		# Team site INCREMENTAL
-		$copyparam = "-CopySettings `$cs"
-	} else {
-		# Team Site FULL
-		$copyparam = "-Merge"
+		$copyparam = "-CopySettings `$csIncr"
 	}
 	if ($row.MySiteEmail) {
 		# MySite /personal/ = always RENAME
 		$copyparam = "-CopySettings `$csMysite"
 	}
-	$ps = "md ""d:\insanemove\log"" -ErrorAction SilentlyContinue;`nStart-Transcript ""d:\insanemove\log\worker$wid-$now.log"";`n""SOURCE=$srcUrl"";`n""DESTINATION=$destUrl"";`n`$secpw=ConvertTo-SecureString -String ""$localHash"";`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$csMysite = New-CopySettings -OnSiteObjectExists Merge -OnContentItemExists Rename;`n`$cs = New-CopySettings -OnSiteObjectExists Merge -OnContentItemExists IncrementalUpdate;`n`$result = Copy-Site -Site `$src -DestinationSite `$dest -Subsites $copyparam -InsaneMode -VersionLimit 50;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
+	$ps = "md ""d:\insanemove\log"" -ErrorAction SilentlyContinue;`nStart-Transcript ""d:\insanemove\log\worker$wid-$now.log"";`n""SOURCE=$srcUrl"";`n""DESTINATION=$destUrl"";`n`$secpw=ConvertTo-SecureString -String ""$localHash"";`n`$cred = New-Object System.Management.Automation.PSCredential (""$($settings.settings.tenant.adminUser)"", `$secpw);`nImport-Module ShareGate;`n`$src=`$null;`n`$dest=`$null;`n`$src = Connect-Site ""$srcUrl"";`n`$dest = Connect-Site ""$destUrl"" -Credential `$cred;`n`$csMysite = New-CopySettings -OnSiteObjectExists Merge -OnContentItemExists Rename;`n`$csIncr = New-CopySettings -OnSiteObjectExists Merge -OnContentItemExists IncrementalUpdate;`n`$result = Copy-Site -Site `$src -DestinationSite `$dest -Subsites -Merge $copyparam -InsaneMode -VersionLimit 50;`n`$result | Export-Clixml ""d:\insanemove\worker$wid.xml"" -Force;`nStop-Transcript"
     $ps | Out-File "\\$pc\d$\insanemove\worker$wid.ps1" -Force
     Write-Host $ps -Fore Yellow
 
