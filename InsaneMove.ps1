@@ -301,8 +301,14 @@ Function UpdateTracker () {
 			$b | Remove-PSSession
 		}
 		
-		# Check SCHTASK State=Ready
+		# Remote session
 		$s = Get-PSSession |? {$_.ComputerName -eq $pc}
+		if (!$s) {
+			# Make new session
+			New-PSSession -ComputerName $pc -Credential $global:cred -Authentication CredSSP -ErrorAction SilentlyContinue
+		}
+		
+		# Check SCHTASK State=Ready
 		$cmd = "Get-Scheduledtask -TaskName 'worker$wid'"
 		$sb = [Scriptblock]::Create($cmd)
 		$schtask = $null
