@@ -8,8 +8,8 @@
 .NOTES
 	File Name		: InsaneMove.ps1
 	Author			: Jeff Jones - @spjeff
-	Version			: 0.40
-	Last Modified	: 01-06-2016
+	Version			: 0.41
+	Last Modified	: 01-24-2016
 .LINK
 	Source Code
 	http://www.github.com/spjeff/insanemove
@@ -413,7 +413,11 @@ Function FindCloudMySite ($MySiteEmail) {
 	$coll = @()
 	$coll += $MySiteEmail
 	$profile = Get-PSPOUserProfileProperty -Account $coll
-	$url = $profile.PersonalUrl.TrimEnd('/')
+	if ($profile) {
+		if ($profile.PersonalUrl) {
+			$url = $profile.PersonalUrl.TrimEnd('/')
+		}
+	}
 	Write-Host "SEARCH for $MySiteEmail found URL $url" -Fore Yellow
 	return $url
 }
